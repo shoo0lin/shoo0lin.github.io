@@ -43,7 +43,7 @@
         <span>9 Nov 2026</span>
         <span>16 min read</span>
         <span>CVSS 3.1 · 5.3 Medium</span>
-        <span>8 figures · 34s repro clip · 42s field clip</span>
+        <span>7 figures · 34s repro clip</span>
       </div>
     </div>
   </section>
@@ -61,7 +61,7 @@
 
       <div class="note">
         <b>What is redacted here</b>
-        Customer names, login identifiers, real names, JCR node IDs, and dispatcher instance suffixes have been replaced. The hosts were still serving the cached responses on 29 October 2026, and publishing a working list of "anonymous identity oracles" would be exactly the harm I am writing about. The unredacted values are in the vendor report and I will share them with anyone who needs them for remediation. The two field captures and the field clip below are cropped from my own screen and covered with a solid bar over the customer identifier, my local username, and the source and destination IP addresses; the certificate details and the <code>adobecqms.net</code> domain are left readable on purpose.
+        Customer names, login identifiers, real names, JCR node IDs, and dispatcher instance suffixes have been replaced. The hosts were still serving the cached responses on 29 October 2026, and publishing a working list of "anonymous identity oracles" would be exactly the harm I am writing about. The unredacted values are in the vendor report and I will share them with anyone who needs them for remediation. The two field captures below are cropped from my own screen and covered with a solid bar over the customer identifier, my local username, and the source and destination IP addresses; the certificate details and the <code>adobecqms.net</code> domain are left readable on purpose.
       </div>
 
       <figure>
@@ -212,14 +212,6 @@ $ curl -s -o /dev/null -w '%{http_code} → %{redirect_url}\n' \
         <li><strong>Accept, cookies, and <code>Authorization</code> do not vary the response.</strong> Sending an invalid bearer token, a junk cookie, or <code>Accept: text/html</code> all return the same cached JSON. The cache key is the path. Nothing about the caller is part of it.</li>
         <li><strong>Path aliases hit the same object.</strong> The clientlibs proxy form — <code>/etc.clientlibs/../libs/granite/security/currentuser.json</code> — returns the identical body, which tells you the key is the <em>normalised</em> path, not the literal request line.</li>
       </ul>
-
-      <figure>
-        <video controls preload="metadata" playsinline poster="../assets/img/aem/07-field-cachekey-poster.jpg" width="1280" height="520">
-          <source src="../assets/img/aem/07-field-cachekey.mp4" type="video/mp4">
-          Your browser does not support the video tag. The two field stills above cover the same request.
-        </video>
-        <figcaption><b>Field clip, 42 seconds, cropped and redacted.</b> The query-string test in motion on the first host. With <code>?_=1</code> the request misses the cache and the origin answers <code>401</code> with <code>Content-Length: 0</code> and <code>WWW-Authenticate: Basic realm="Sling (Development)"</code> — an empty challenge, no user data. The dispatcher's own <code>X-Dispatcher</code> header is still on that response; the path without the query string is the one that returns the cached identity, as the notes typed during the clip record. There is no response body to show, because a miss has none. The field still earlier in this chapter is the same request.</figcaption>
-      </figure>
 
       <figure>
         <img src="../assets/img/aem/02-cache-miss.png" alt="Terminal output showing the query-string cache miss returning 401, the wrong-cookie request still served from cache, and two neighbour paths challenging." width="1500" height="1226">
