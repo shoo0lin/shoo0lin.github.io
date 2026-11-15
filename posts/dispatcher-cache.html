@@ -43,7 +43,7 @@
         <span>9 Nov 2026</span>
         <span>16 min read</span>
         <span>CVSS 3.1 · 5.3 Medium</span>
-        <span>5 figures · 34s repro clip</span>
+        <span>8 figures · 34s repro clip · 42s field clip</span>
       </div>
     </div>
   </section>
@@ -61,7 +61,7 @@
 
       <div class="note">
         <b>What is redacted here</b>
-        Customer names, login identifiers, real names, JCR node IDs, and dispatcher instance suffixes have been replaced. The hosts were still serving the cached responses on 29 October 2026, and publishing a working list of "anonymous identity oracles" would be exactly the harm I am writing about. The unredacted values are in the vendor report and I will share them with anyone who needs them for remediation.
+        Customer names, login identifiers, real names, JCR node IDs, and dispatcher instance suffixes have been replaced. The hosts were still serving the cached responses on 29 October 2026, and publishing a working list of "anonymous identity oracles" would be exactly the harm I am writing about. The unredacted values are in the vendor report and I will share them with anyone who needs them for remediation. The two field captures and the field clip below are cropped from my own screen and covered with a solid bar over the customer identifier, my local username, and the source and destination IP addresses; the certificate details and the <code>adobecqms.net</code> domain are left readable on purpose.
       </div>
 
       <figure>
@@ -164,6 +164,13 @@
 
       <p>That matrix is from the first host, where I ran the full set. On the other four I repeated the two checks that matter — the cached path and, where recorded, the query-string control — and got the same shape. I am not going to claim a five-path matrix I did not run on every host.</p>
 
+      <figure class="figure-wide">
+        <div class="pan">
+          <img src="../assets/img/aem/05-field-neighbour.png" alt="Field terminal capture: a curl request carrying a session cookie sent to the sibling path /libs/granite/security/profile.json, followed by the TLS handshake and certificate details. The response is not in frame." width="2560" height="1038">
+        </div>
+        <figcaption><b>Field capture, cropped and redacted.</b> The neighbour control on the first host: the same session cookie, sent to a sibling under <code>/libs/granite/security/</code>, comes back with the SAML sign-in page instead of data. The capture shows the request line and the TLS handshake; the response sits further down the scrollback. The customer identifier in the host name is masked — the certificate subject and the <code>adobecqms.net</code> domain stay readable, because the domain is the part that matters.</figcaption>
+      </figure>
+
       <h2 id="proof"><span class="ch">Chapter 3</span>Proving the cache did it</h2>
 
       <p>"It returned a user object" is an observation. "A cache in front of a hardened origin returned a stale user object" is a claim, and claims need a mechanism test. The one that worked is almost embarrassingly simple: change the cache key.</p>
@@ -185,6 +192,13 @@ $ curl -s -o /dev/null -w '%{http_code} → %{redirect_url}\n' \
 
       <p>Same URL. Same headers. Same client. One character of query string apart. With the query string, the request misses the cache, reaches AEM, and AEM does exactly what it is supposed to do: refuse. Without it, Apache answers from a file on disk.</p>
 
+      <figure class="figure-wide">
+        <div class="pan">
+          <img src="../assets/img/aem/06-field-cachekey.png" alt="Field terminal capture: a curl request to /libs/granite/security/currentuser.json?_=1, followed by the TLS handshake and certificate details. The response is not in frame." width="2560" height="1038">
+        </div>
+        <figcaption><b>Field capture, cropped and redacted.</b> The same test in the same terminal: appending <code>?_=1</code> changes the cache key, so the request misses the cache and reaches the origin. The line typed at the top of the window — <em>“Different auth mechanism (Basic auth, not SAML redirect) but same result — no data leaked”</em> — is the neighbour result from the step above. Request and handshake only; the response is below the fold. Host identifier masked.</figcaption>
+      </figure>
+
       <figure>
         <img src="../assets/img/anim/02-aem-dispatcher.gif" alt="Animated diagram: one anonymous request warms the dispatcher cache for a security endpoint, after which every later request is served the cached authenticated identity." width="1200" height="675">
         <figcaption><b>Reconstruction, not a capture.</b> Why the path is the whole problem: the cache key is the URL, so the first anonymous <code>GET</code> creates the entry and every later caller inherits whatever that entry says. No session is involved on either side. Draws the mechanism, not a screen.</figcaption>
@@ -198,6 +212,14 @@ $ curl -s -o /dev/null -w '%{http_code} → %{redirect_url}\n' \
         <li><strong>Accept, cookies, and <code>Authorization</code> do not vary the response.</strong> Sending an invalid bearer token, a junk cookie, or <code>Accept: text/html</code> all return the same cached JSON. The cache key is the path. Nothing about the caller is part of it.</li>
         <li><strong>Path aliases hit the same object.</strong> The clientlibs proxy form — <code>/etc.clientlibs/../libs/granite/security/currentuser.json</code> — returns the identical body, which tells you the key is the <em>normalised</em> path, not the literal request line.</li>
       </ul>
+
+      <figure>
+        <video controls preload="metadata" playsinline poster="../assets/img/aem/07-field-cachekey-poster.jpg" width="1280" height="520">
+          <source src="../assets/img/aem/07-field-cachekey.mp4" type="video/mp4">
+          Your browser does not support the video tag. The two field stills above cover the same request.
+        </video>
+        <figcaption><b>Field clip, 42 seconds, cropped and redacted.</b> The query-string test in motion on the first host. With <code>?_=1</code> the request misses the cache and the origin answers <code>401</code> with <code>Content-Length: 0</code> and <code>WWW-Authenticate: Basic realm="Sling (Development)"</code> — an empty challenge, no user data. The dispatcher's own <code>X-Dispatcher</code> header is still on that response; the path without the query string is the one that returns the cached identity, as the notes typed during the clip record. There is no response body to show, because a miss has none. The field still earlier in this chapter is the same request.</figcaption>
+      </figure>
 
       <figure>
         <img src="../assets/img/aem/02-cache-miss.png" alt="Terminal output showing the query-string cache miss returning 401, the wrong-cookie request still served from cache, and two neighbour paths challenging." width="1500" height="1226">
