@@ -3,6 +3,7 @@
 > Field notes from the seam between server and browser.
 
 [![Live site](https://img.shields.io/badge/live-shoo0lin.github.io-e00000?style=flat-square)](https://shoo0lin.github.io)
+[![Source](https://img.shields.io/badge/source-shoo0lin.github.io-111111?style=flat-square)](https://github.com/shoo0lin/shoo0lin.github.io)
 ![Finding](https://img.shields.io/badge/finding-reproduced-111111?style=flat-square)
 ![Field](https://img.shields.io/badge/finding-field--verified-111111?style=flat-square)
 ![Severity](https://img.shields.io/badge/CVSS%203.1-8.8%20High-e00000?style=flat-square)
@@ -27,6 +28,7 @@ reading the Lambda execution role's credentials out of its own Serverless functi
 | I | [The Accordion That Opened a Door](https://shoo0lin.github.io/posts/interactivity-accordion.html) | The client/server URL-policy mismatch; stored XSS; 62-capability read and an admin write after one click. CVSS ≈ 8.8. |
 | II | [The Click That Ended at uid=0](https://shoo0lin.github.io/posts/click-to-root.html) | The same primitive pushed through the admin plugin editor: nonce harvest → `hello.php` overwrite → command execution, confirmed by hash and by an outbound callback. |
 | — | [The Cache That Remembered a Stranger](https://shoo0lin.github.io/posts/dispatcher-cache.html) | AEM author tiers caching `/libs/granite/security/currentuser.json`: five hosts, two AMS customers, identities up to 21 months stale. Identity disclosure only; CVSS 5.3. Identities and hostnames redacted. |
+| — | [Bypassing Temp File Randomization: /proc/self/fd/N + sqlite3 Extensions RCE in Rails](https://shoo0lin.github.io/posts/rails-sqlite3-fd-rce.html) | Given unsafe `constantize` / `Marshal.load` as the precondition, a Rack multipart tempfile stays reachable as `/proc/self/fd/N` and the sqlite3 extension loader turns that path into native code execution. Verified in a local Rails 8.0.1 / Ruby 3.4 / sqlite3 1.8.0 testbed; a post-exploitation gadget, not a Rails, Rack, or sqlite3 vulnerability by itself. |
 
 ## The Profile Lock finding, in short
 
