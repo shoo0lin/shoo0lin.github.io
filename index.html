@@ -75,6 +75,15 @@
 
     <div class="post-grid">
 
+      <a class="card" href="posts/rails-sqlite3-fd-rce.html">
+        <div class="card-body">
+          <div class="c-tag">Rails · sqlite3 · Unsafe reflection · Research note</div>
+          <h2>Bypassing Temp File Randomization: /proc/self/fd/N + sqlite3 Extensions RCE in Rails</h2>
+          <p>A default-installed sqlite3 constructor loads a native extension, and Rack's randomized multipart tempfile can be reached through <code>/proc/self/fd/N</code>. Both turns work through reflection and <code>Marshal.load</code> on a pinned local Rails testbed. A new gadget for already-dangerous code, not a Rails vulnerability by itself.</p>
+          <div class="c-meta"><span>23 Nov 2026</span><span>14 min read</span></div>
+        </div>
+      </a>
+
       <a class="card" href="posts/twilio-trial-serverless.html">
         <div class="card-thumb">
           <img src="assets/img/twilio/00-cover-twilio.png" alt="Reconstruction of the function's JSON response: masked AWS key, session token present, and parent_token_present false highlighted in red.">
