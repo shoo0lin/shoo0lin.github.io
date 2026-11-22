@@ -399,8 +399,10 @@ python3 -m http.server 8000
   flushing, session theft), the request shape, the responses and the negative controls are
   the evidence instead.
 - Illustrations that are not screenshots are labelled as reconstructions in the caption.
-  The six animated figures under `assets/img/anim/` are drawn diagrams, not screen
-  captures, and say so in both the caption and the image itself.
+  The eight animated figures under `assets/img/anim/` are drawn diagrams, not screen
+  captures, and say so in both the caption and the image itself. Two of them (the Rails
+  `/proc/self/fd/N` bypass and the sqlite3 extension chain) also ship as short MP4 clips
+  rendered from the same drawn frames, with poster stills in the same directory.
 
 ---
 

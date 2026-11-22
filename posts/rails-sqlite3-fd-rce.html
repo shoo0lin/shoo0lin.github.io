@@ -217,6 +217,19 @@ i am in your filesystem :)</code><button class="copy">copy</button></pre>
 
       <p>That is the whole bypass. Rack randomises the filename; the descriptor path does not use the filename.</p>
 
+      <figure>
+        <img src="../assets/img/anim/07-rails-fd-bypass.gif" alt="Animated reconstruction: an application/x-sharedlib multipart part becomes a Rack tempfile with a random suffix, the process descriptor table shows that tempfile on descriptor 13, and /proc/self/fd/13 is used as a stable path to the same open file." width="1200" height="675">
+        <figcaption><b>Figure 1 · RECONSTRUCTION · NOT A CAPTURE.</b> The uploaded part and the descriptor alias point at the same inode: Rack randomises the filename, the <code>/proc/self/fd/N</code> path does not use it. This is only useful where user input already selects a class to instantiate or reaches <code>Marshal.load</code> &mdash; it does not create that precondition on its own.</figcaption>
+      </figure>
+
+      <figure>
+        <video controls preload="metadata" poster="../assets/img/anim/07-rails-fd-bypass-poster.jpg">
+          <source src="../assets/img/anim/07-rails-fd-bypass.mp4" type="video/mp4">
+          Your browser does not support the video tag. <a href="../assets/img/anim/07-rails-fd-bypass.mp4">Download the clip</a>.
+        </video>
+        <figcaption><b>Figure 2 · RECONSTRUCTION · NOT A CAPTURE.</b> The same fd walk as a short clip. Descriptor <code>13</code> is the number seen in the reflection run and is enumerated from the target process, never assumed; the Marshal run used <code>12</code>. Both turns still require unsafe reflection or <code>Marshal.load</code> in the target application.</figcaption>
+      </figure>
+
       <h2 id="reflection"><span class="ch">Chapter 6</span>Reflection: constructing the database</h2>
 
       <p>With <code>payload.so</code> uploaded and its descriptor identified, the reflection endpoint does the rest. The JSON arguments map directly onto <code>SQLite3::Database.new(database_path, options)</code>:</p>
@@ -325,6 +338,19 @@ puts Base64.encode64(Marshal.dump(proxy)).gsub("\n", "")</code><button class="co
         <b>The precondition is the finding</b>
         Both paths end in native code execution, so it would be easy to call this a Rails remote-code-execution vulnerability. It isn't. An application that lets user input select a class to instantiate, or feeds user input to <code>Marshal.load</code>, already has arbitrary code execution available to anyone who knows a suitable gadget. This research adds a gadget that survives the 2017 <code>Logger</code> fix and works from a default installation; it does not create the dangerous pattern.
       </div>
+
+      <figure>
+        <img src="../assets/img/anim/08-rails-sqlite3-chain.gif" alt="Animated reconstruction: unsafe reflection and Marshal.load are two entry points that converge on SQLite3::Database.new with the descriptor path in extensions, which makes sqlite load the native extension and run its initialisation function." width="1200" height="675">
+        <figcaption><b>Figure 3 · RECONSTRUCTION · NOT A CAPTURE.</b> Two entry points, one sink: attacker-controlled class selection reaches <code>SQLite3::Database.new</code> through reflection, and a <code>Marshal.load</code> gadget reaches it through <code>SQLite3Adapter#connect!</code>. Both pass the descriptor path in <code>extensions:</code> and both execute native code. That is a gadget for an existing unsafe-reflection or deserialisation pattern, not a Rails, Rack, or sqlite3 vulnerability by itself.</figcaption>
+      </figure>
+
+      <figure>
+        <video controls preload="metadata" poster="../assets/img/anim/08-rails-sqlite3-chain-poster.jpg">
+          <source src="../assets/img/anim/08-rails-sqlite3-chain.mp4" type="video/mp4">
+          Your browser does not support the video tag. <a href="../assets/img/anim/08-rails-sqlite3-chain.mp4">Download the clip</a>.
+        </video>
+        <figcaption><b>Figure 4 · RECONSTRUCTION · NOT A CAPTURE.</b> The full chain as a short clip, ending in the <code>touch /tmp/rce-conf.txt</code> marker used on the local testbed. The trail only starts where an application already lets user input choose a class or feeds it to <code>Marshal.load</code>; without that precondition there is no entry point for this gadget.</figcaption>
+      </figure>
 
       <h2 id="versions"><span class="ch">Chapter 8</span>Scope and version notes</h2>
 
