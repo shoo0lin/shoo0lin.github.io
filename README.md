@@ -81,6 +81,11 @@ The harnesses behind the posts live in separate repositories:
   the function that reads its own `/proc/self/environ`, the deploy and fetch scripts, the three-way
   session-token control, and the redactor with its self-test. Deploys only to an account you own;
   the raw bundle with the live credentials and SIDs is not published.
+- **[shoo0lin/rails-sqlite3-fd-rce](https://github.com/shoo0lin/rails-sqlite3-fd-rce)** — the local,
+  disposable Rails 8.0.1 / Ruby 3.4 / sqlite3 1.8.0 harness: the C shared object loaded as a
+  sqlite3 extension, the Ruby `Marshal.load` / `constantize` trigger, the vulnerable controller
+  and route, and a Dockerfile. Takes an unsafe-reflection/`Marshal.load` primitive as given;
+  reproduces only against the throwaway testbed, never a live target.
 
 ---
 
