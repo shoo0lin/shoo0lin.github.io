@@ -64,6 +64,24 @@
           <span class="read">Read the write-up &rarr;</span>
         </div>
       </a>
+
+      <a class="feature" href="posts/rails-sqlite3-fd-rce.html">
+        <div class="feature-media">
+          <img src="assets/img/anim/07-rails-fd-bypass-poster.jpg" alt="Reconstruction · not a capture: an application/x-sharedlib multipart part becomes a Rack tempfile with a random suffix, while /proc/self/fd/N addresses the same open file without that suffix.">
+          <span class="play">Reconstruction</span>
+        </div>
+        <div class="feature-body">
+          <div class="c-tag">Rails · sqlite3 · Unsafe reflection · Research note</div>
+          <h2>Bypassing Temp File Randomization: /proc/self/fd/N + sqlite3 Extensions RCE in Rails</h2>
+          <p>A default-installed sqlite3 constructor loads a native extension, and Rack's randomized multipart tempfile can be reached through <code>/proc/self/fd/N</code>. Both turns work only where user input already reaches unsafe <code>constantize</code> or <code>Marshal.load</code> — demonstrated on a pinned local Rails testbed, not a Rails vulnerability by itself.</p>
+          <div class="c-meta">
+            <span>23 Nov 2026</span>
+            <span>14 min read</span>
+            <span>Research note</span>
+          </div>
+          <span class="read">Read the write-up &rarr;</span>
+        </div>
+      </a>
     </div>
   </section>
 
